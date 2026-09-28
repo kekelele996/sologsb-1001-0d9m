@@ -90,6 +90,16 @@ button, input, textarea { font: inherit; }
 .source-text { margin: 7px 0 3px; color: #1d2b41; font-size: 14px; font-weight: 580; }
 .target-text { margin: 0; color: #50617a; font-size: 12px; line-height: 1.55; }
 .target-text.empty { color: #a6b0bf; font-style: italic; }
+.cue-toolbar-right { display: flex; align-items: center; gap: 8px; }
+.target-lines { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 0; }
+.target-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 1px 6px 1px 0; border-radius: 4px; }
+.target-line.over { background: #fdecec; }
+.target-line .line-text { color: #50617a; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.target-line.over .line-text { color: #c0392b; }
+.line-width { flex-shrink: 0; color: #93a0b3; font-size: 10px; font-family: ui-monospace, monospace; }
+.line-width.over { color: #d34a44; font-weight: 700; }
+.cue-layout-reasons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.layout-reason { padding: 1px 7px; border-radius: 9px; color: #b1342f; background: #fdeeee; font-size: 10px; }
 .cue-quick-actions { display: flex; flex-direction: column; align-items: flex-end; opacity: .2; transition: opacity .15s; }
 .cue-row:hover .cue-quick-actions, .cue-row.active .cue-quick-actions { opacity: 1; }
 .empty-state, .empty-inspector { padding: 32px; color: #8793a5; text-align: center; font-size: 13px; }
@@ -106,6 +116,32 @@ button, input, textarea { font: inherit; }
 .check-card p { margin: 5px 0; font-size: 11px; line-height: 1.45; }
 .check-ok { color: #358268; }
 .check-warning { color: #ad6610; }
+.target-label-row { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
+.target-label-row label { margin-top: 0; }
+.manual-hint { margin: 2px 0 0; color: #8a96a8; font-size: 10px; line-height: 1.45; }
+.manual-hint.locked-hint { color: #b18a2e; }
+.layout-card { padding: 10px 11px; border: 1px solid #e0e7f0; border-radius: 9px; background: #f8fafc; }
+.layout-card.overstate { border-color: #eebfbd; background: #fdf6f6; }
+.layout-card h3 { margin: 0 0 7px; color: #34435b; font-size: 12px; }
+.preview-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 2px 5px; border-radius: 4px; }
+.preview-line + .preview-line { margin-top: 1px; }
+.preview-line .line-text { font-size: 12px; color: #46546b; white-space: pre-wrap; word-break: break-word; }
+.preview-line small { flex-shrink: 0; color: #93a0b3; font-size: 10px; font-family: ui-monospace, monospace; }
+.preview-line.over { background: #fdecec; }
+.preview-line.over .line-text { color: #c0392b; }
+.preview-line.over small { color: #d34a44; font-weight: 700; }
+.layout-form h4 { margin: 0 0 10px; font-size: 14px; }
+.layout-form label { display: block; margin: 10px 0 4px; color: #5b687d; font-size: 12px; }
+.layout-form p { margin: 10px 0; color: #8a96a8; font-size: 11px; line-height: 1.5; }
+.export-blocked-body { margin: 0 0 12px; color: #8a3a35; font-size: 13px; }
+.export-issue-list { max-height: 340px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.export-issue-item { padding: 10px 12px; border: 1px solid #f0d2d0; border-radius: 8px; background: #fdf7f7; }
+.export-issue-head { display: flex; align-items: center; gap: 8px; }
+.export-issue-head b { color: #a33; font-family: ui-monospace, monospace; font-size: 12px; }
+.export-issue-head .el-button { margin-left: auto; }
+.export-issue-text { margin: 6px 0; color: #46546b; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.export-issue-item ul { margin: 0; padding-left: 18px; color: #b1342f; font-size: 11px; line-height: 1.6; }
+.export-all-fixed { margin-top: 14px; text-align: center; font-size: 13px; }
 .cue-index { color: #8190a7; font-family: ui-monospace, monospace; }
 .shortcut-bar { position: fixed; z-index: 25; left: 258px; right: 360px; bottom: 0; height: 36px; display: flex; align-items: center; gap: 16px; padding: 0 18px; color: #c8d3e3; background: rgba(16, 29, 49, .96); font-size: 10px; }
 .shortcut-bar strong { color: #f2ba5d; }

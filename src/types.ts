@@ -35,10 +35,34 @@ export interface Snapshot {
   cues: Cue[]
 }
 
+export interface LayoutSpec {
+  /** 每行最多字数（中文按 1 字、英文等半角字符按 0.5 字计宽） */
+  maxCharsPerLine: number
+  /** 每条译文最多行数 */
+  maxLines: number
+}
+
+export type LayoutReason = 'lineOverflow' | 'tooManyLines'
+
+export interface LayoutLine {
+  text: string
+  width: number
+  over: boolean
+}
+
+export interface LayoutIssue {
+  cueId: string
+  reason: LayoutReason
+  lineIndex?: number
+  width?: number
+  lineCount?: number
+}
+
 export interface EditorDocument {
   id: string
   title: string
   language: Locale
+  layoutSpec: LayoutSpec
   cues: Cue[]
   actors: Actor[]
   terms: Term[]

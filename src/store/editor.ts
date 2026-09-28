@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import type { Cue, EditorDocument, Locale, Snapshot } from '../types'
+import type { Cue, EditorDocument, LayoutIssue, LayoutSpec, Locale, Snapshot } from '../types'
 import { loadDocument, saveDocument } from '../utils/db'
 import { makeId } from '../utils/id'
 import { parseScript, parseSrt, toSrt } from '../utils/subtitle'
+import { balanceText, checkLayout, clampLayoutSpec, DEFAULT_LAYOUT_SPEC } from '../utils/layout'
 import { translate, type MessageKey } from '../i18n'
 
 const DOCUMENT_ID = 'subtitle-dubbing-document'
@@ -16,6 +17,7 @@ const createDefaultDocument = (): EditorDocument => ({
   id: DOCUMENT_ID,
   title: '纪录片《开源之路》中文配音',
   language: 'zh-CN',
+  layoutSpec: { ...DEFAULT_LAYOUT_SPEC },
   revision: 0,
   updatedAt: Date.now(),
   lastWriter: '',
@@ -74,6 +76,19 @@ export const useEditorStore = defineStore('subtitle-editor', {
     totalDuration(state): number {
       return Math.max(10, ...state.document.cues.map((cue) => cue.end)) * 1.04
     },
+    layoutSpec(state): LayoutSpec {
+      return state.document.layoutSpec ?? { ...DEFAULT_LAYOUT_SPEC }
+    },
+    layoutViolations(state): Array<{ cue: Cue; issues: LayoutIssue[] }> {
+      const spec = state.document.layoutSpec ?? DEFAULT_LAYOUT_SPEC
+      const result: Array<{ cue: Cue; issues: LayoutIssue[] }> = []
+      for (const cue of state.document.cues) {
+        if (!cue.target) continue // 未填写译文不参与排版检查
+        const { issues } = checkLayout(cue.target, spec)
+        if (issues.length) result.push({ cue, issues: issues.map((issue) => ({ ...issue, cueId: cue.id })) })
+      }
+      return result
+    },
   },
   actions: {
     async initialize() {
@@ -81,6 +96,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.online = navigator.onLine
       const stored = await loadDocument(DOCUMENT_ID)
       if (stored) {
+        if (!stored.layoutSpec) stored.layoutSpec = { ...DEFAULT_LAYOUT_SPEC }
         this.document = stored
         this.lastSeenRevision = stored.revision
       } else {
@@ -222,7 +238,11 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.updateCue(id, { status }, `status:${status}`)
     },
     toggleLock(id: string) {
-      this.updateCue(id, { locked: !this.document.cues.find((cue) => cue.id === id)?.locked }, 'toggle-lock')
+      const locked = !!this.document.cues.find((cue) => cue.id === id)?.locked
+      this.commit('toggle-lock', (cues) => {
+        const cue = cues.find((item) => item.id === id)
+        if (cue) cue.locked = !locked
+      })
     },
     splitCue(id: string) {
       const source = this.document.cues.find((cue) => cue.id === id)
@@ -307,7 +327,40 @@ export const useEditorStore = defineStore('subtitle-editor', {
       }, cues[0].id)
       return cues.length
     },
-    exportSrt() {
+    setLayoutSpec(patch: Partial<LayoutSpec>) {
+      const spec = clampLayoutSpec({ ...this.layoutSpec, ...patch })
+      this.document.layoutSpec = spec
+      this.markChanged('layout-spec')
+    },
+    /** 一键把单条未锁定译文排成平衡多行；锁定台词只检查不改写。返回是否发生变化 */
+    autoBreakCue(id: string): boolean {
+      const cue = this.document.cues.find((item) => item.id === id)
+      if (!cue || cue.locked || !cue.target) return false
+      const balanced = balanceText(cue.target, this.layoutSpec)
+      if (balanced === cue.target.trim()) return false
+      this.updateCue(id, { target: balanced }, 'auto-break')
+      return true
+    },
+    /** 一键排版所有超限的未锁定台词；返回实际调整条数，锁定条目原样保留 */
+    autoBreakAll(): number {
+      const spec = this.layoutSpec
+      const changes = new Map<string, string>()
+      for (const cue of this.document.cues) {
+        if (cue.locked || !cue.target) continue
+        if (checkLayout(cue.target, spec).passes) continue
+        const balanced = balanceText(cue.target, spec)
+        if (balanced !== cue.target) changes.set(cue.id, balanced)
+      }
+      if (!changes.size) return 0
+      this.commit('auto-break-all', (cues) => {
+        for (const cue of cues) {
+          const balanced = changes.get(cue.id)
+          if (balanced !== undefined) cue.target = balanced
+        }
+      })
+      return changes.size
+    },
+    exportSrt(): boolean {
       const blob = new Blob([toSrt(this.document.cues)], { type: 'text/plain;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
@@ -315,6 +368,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       anchor.download = `${this.document.title || 'subtitle'}.srt`
       anchor.click()
       URL.revokeObjectURL(url)
+      return true
     },
   },
 })

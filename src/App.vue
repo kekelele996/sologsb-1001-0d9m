@@ -3,19 +3,22 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
-  RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
+  Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor, Operation,
+  RefreshLeft, RefreshRight, Search, SetUp, Unlock, UploadFilled,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from './store/editor'
-import type { Cue, CueConflict } from './types'
+import type { Cue, CueConflict, LayoutIssue, LayoutLine } from './types'
+import { checkLayout } from './utils/layout'
 import { formatTime } from './utils/subtitle'
 
 const store = useEditorStore()
-const { document: project, selectedCue, selectedCueId, visibleCues, saveState, conflict, online, timelineZoom, actorFilter } = storeToRefs(store)
+const { document: project, selectedCue, selectedCueId, visibleCues, saveState, conflict, online, timelineZoom, actorFilter, layoutSpec, layoutViolations } = storeToRefs(store)
 const fileInput = ref<HTMLInputElement>()
 const snapshotDialog = ref(false)
 const snapshotName = ref('')
 const search = ref('')
+const specDraft = ref({ maxCharsPerLine: 18, maxLines: 2 })
+const exportBlocked = ref(false)
 
 const filteredCues = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -65,6 +68,51 @@ function cueWarnings(cue: Cue): CueConflict[] {
 }
 function termMismatches(cue: Cue) {
   return project.value.terms.filter((term) => cue.termIds.includes(term.id) && cue.target && !cue.target.includes(term.target))
+}
+const cueLayout = (cue: Cue) => checkLayout(cue.target ?? '', layoutSpec.value)
+const hasLayoutIssue = (cue: Cue) => !!cue.target && !cueLayout(cue).passes
+function issueReason(issue: LayoutIssue) {
+  if (issue.reason === 'lineOverflow') return store.t('layoutReasonLineOverflow', { line: (issue.lineIndex ?? 0) + 1, width: issue.width ?? 0, max: layoutSpec.value.maxCharsPerLine })
+  return store.t('layoutReasonTooManyLines', { count: issue.lineCount ?? 0, max: layoutSpec.value.maxLines })
+}
+function cueIssues(cue: Cue): LayoutIssue[] {
+  return cueLayout(cue).issues.map((issue) => ({ ...issue, cueId: cue.id }))
+}
+const selectedLayout = computed(() => selectedCue.value ? cueLayout(selectedCue.value) : { lines: [] as LayoutLine[], issues: [], lineCount: 0, passes: true })
+function lineClass(line: LayoutLine) {
+  return { over: line.over }
+}
+function openSpec() {
+  specDraft.value = { ...layoutSpec.value }
+}
+function saveSpec() {
+  store.setLayoutSpec(specDraft.value)
+  ElMessage.success(store.t('layoutSpecSaved'))
+}
+function autoBreakSelected() {
+  if (!selectedCue.value) return
+  if (store.autoBreakCue(selectedCue.value.id)) ElMessage.success(store.t('autoBreakDone', { count: 1 }))
+  else ElMessage.info(store.t('nothingToAutoBreak'))
+}
+function autoBreakAll() {
+  const count = store.autoBreakAll()
+  if (count > 0) ElMessage.success(store.t('autoBreakDone', { count }))
+  else ElMessage.info(store.t('nothingToAutoBreak'))
+}
+function requestExport() {
+  if (layoutViolations.value.length) {
+    exportBlocked.value = true
+    return
+  }
+  store.exportSrt()
+}
+function rebreakFromDialog() {
+  const count = store.autoBreakAll()
+  if (count > 0) ElMessage.success(store.t('autoBreakDone', { count }))
+  else ElMessage.info(store.t('nothingToAutoBreak'))
+}
+function issueCueNumber(cueId: string) {
+  return project.value.cues.findIndex((cue) => cue.id === cueId) + 1
 }
 async function importFile(event: Event) {
   const input = event.target as HTMLInputElement
@@ -144,8 +192,22 @@ const handleOffline = () => setOnline(false)
         </el-select>
         <span class="save-state" :class="saveState"><i />{{ saveLabel }}</span>
         <input ref="fileInput" class="file-input" type="file" accept=".srt,.txt,text/plain" @change="importFile" />
+        <el-popover :width="300" placement="bottom-end" trigger="click" @show="openSpec">
+          <template #reference>
+            <el-button :icon="SetUp">{{ store.t('layoutSpec') }}</el-button>
+          </template>
+          <div class="layout-form">
+            <h4>{{ store.t('layoutSpec') }}</h4>
+            <label>{{ store.t('layoutMaxChars') }}</label>
+            <el-input-number v-model="specDraft.maxCharsPerLine" :min="4" :max="60" size="small" controls-position="right" />
+            <label>{{ store.t('layoutMaxLines') }}</label>
+            <el-input-number v-model="specDraft.maxLines" :min="1" :max="6" size="small" controls-position="right" />
+            <p>{{ store.t('layoutWidthRule') }}</p>
+            <el-button type="primary" size="small" @click="saveSpec">{{ store.t('save') }}</el-button>
+          </div>
+        </el-popover>
         <el-button :icon="UploadFilled" @click="fileInput?.click()">{{ store.t('import') }}</el-button>
-        <el-button :icon="Download" @click="store.exportSrt">{{ store.t('export') }}</el-button>
+        <el-button :icon="Download" @click="requestExport">{{ store.t('export') }}</el-button>
         <el-button type="primary" :icon="DocumentCopy" @click="snapshotDialog = true">{{ store.t('snapshot') }}</el-button>
       </div>
     </header>
@@ -226,11 +288,14 @@ const handleOffline = () => setOnline(false)
 
         <div class="cue-toolbar">
           <div class="section-heading"><span>{{ store.t('cues') }}</span><el-tag size="small" type="info">{{ filteredCues.length }}</el-tag></div>
-          <el-input v-model="search" :prefix-icon="Search" clearable placeholder="搜索原文或译文" class="cue-search" />
-          <el-select v-model="actorFilter" class="actor-mobile-filter">
-            <el-option :label="store.t('allActors')" value="all" />
-            <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
-          </el-select>
+          <div class="cue-toolbar-right">
+            <el-button size="small" :icon="Operation" :disabled="!layoutViolations.length" @click="autoBreakAll">{{ store.t('layoutAutoBreakAll') }}</el-button>
+            <el-input v-model="search" :prefix-icon="Search" clearable placeholder="搜索原文或译文" class="cue-search" />
+            <el-select v-model="actorFilter" class="actor-mobile-filter">
+              <el-option :label="store.t('allActors')" value="all" />
+              <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
+            </el-select>
+          </div>
         </div>
 
         <div class="cue-list">
@@ -245,14 +310,25 @@ const handleOffline = () => setOnline(false)
                 <code>{{ formatTime(cue.start) }} → {{ formatTime(cue.end) }}</code>
                 <el-tag size="small" :type="statusType(cue.status)">{{ statusLabel(cue.status) }}</el-tag>
                 <el-icon v-if="cue.locked"><Lock /></el-icon>
+                <el-tag v-if="hasLayoutIssue(cue)" size="small" type="danger" effect="plain">{{ store.t('layoutCueTag') }}</el-tag>
                 <span class="cue-warning-count" v-if="cueWarnings(cue).length">{{ cueWarnings(cue).length }} context</span>
               </div>
               <p class="source-text">{{ cue.source }}</p>
-              <p class="target-text" :class="{ empty: !cue.target }">{{ cue.target || '尚未填写译文' }}</p>
+              <div v-if="cue.target" class="target-lines">
+                <div v-for="(line, lineIndex) in cueLayout(cue).lines" :key="lineIndex" class="target-line" :class="lineClass(line)">
+                  <span class="line-text">{{ line.text }}</span>
+                  <small class="line-width" :class="{ over: line.over }">{{ store.t('layoutLineWidth', { width: line.width, max: layoutSpec.maxCharsPerLine }) }}</small>
+                </div>
+              </div>
+              <p v-else class="target-text empty">尚未填写译文</p>
+              <div v-if="hasLayoutIssue(cue)" class="cue-layout-reasons">
+                <span v-for="(issue, reasonIndex) in cueIssues(cue)" :key="reasonIndex" class="layout-reason">{{ issueReason(issue) }}</span>
+              </div>
             </div>
             <div class="cue-quick-actions">
               <el-button size="small" text :icon="MagicStick" @click.stop="store.splitCue(cue.id)">{{ store.t('split') }}</el-button>
               <el-button size="small" text :icon="Files" @click.stop="store.mergeNext(cue.id)">{{ store.t('merge') }}</el-button>
+              <el-button v-if="hasLayoutIssue(cue) && !cue.locked" size="small" text type="primary" :icon="Operation" @click.stop="store.autoBreakCue(cue.id)">{{ store.t('layoutAutoBreak') }}</el-button>
               <el-button size="small" text :icon="Delete" @click.stop="requestDelete(cue.id)" />
             </div>
           </article>
@@ -279,8 +355,22 @@ const handleOffline = () => setOnline(false)
           </div>
           <label>{{ store.t('source') }}</label>
           <el-input :model-value="selectedCue.source" type="textarea" :rows="4" :disabled="selectedCue.locked" @change="updateSelected({ source: String($event) }, 'source-text')" />
-          <label>{{ store.t('target') }}</label>
+          <div class="target-label-row">
+            <label>{{ store.t('target') }}</label>
+            <el-button size="small" text type="primary" :icon="Operation" :disabled="selectedCue.locked || !selectedCue.target" @click="autoBreakSelected">{{ store.t('layoutAutoBreak') }}</el-button>
+          </div>
           <el-input :model-value="selectedCue.target" type="textarea" :rows="5" :disabled="selectedCue.locked" @change="updateSelected({ target: String($event) }, 'target-text')" />
+          <p class="manual-hint">{{ store.t('layoutManualHint') }}</p>
+          <div v-if="selectedCue.target" class="layout-card" :class="{ overstate: !selectedLayout.passes }">
+            <h3>{{ store.t('layoutPreview') }}</h3>
+            <div v-for="(line, lineIndex) in selectedLayout.lines" :key="lineIndex" class="preview-line" :class="{ over: line.over }">
+              <span class="line-text">{{ line.text }}</span>
+              <small>{{ store.t('layoutLineWidth', { width: line.width, max: layoutSpec.maxCharsPerLine }) }}</small>
+            </div>
+            <p v-if="selectedLayout.passes" class="check-ok">{{ store.t('layoutPass') }}</p>
+            <p v-for="(issue, reasonIndex) in selectedLayout.issues" :key="reasonIndex" class="check-warning">{{ issueReason(issue) }}</p>
+          </div>
+          <p v-if="selectedCue.locked" class="manual-hint locked-hint">{{ store.t('layoutLockedOnly') }}</p>
           <div class="two-columns">
             <div><label>{{ store.t('speed') }}</label><el-input-number :model-value="selectedCue.speed" :disabled="selectedCue.locked" :min="0.5" :max="1.8" :step="0.01" controls-position="right" @change="updateSelected({ speed: Number($event) }, 'speed')" /></div>
             <div><label>{{ store.t('status') }}</label><el-select :model-value="selectedCue.status" :disabled="selectedCue.locked" @change="store.markStatus(selectedCue.id, $event)"><el-option :label="store.t('draft')" value="draft" /><el-option :label="store.t('reviewed')" value="reviewed" /><el-option :label="store.t('issue')" value="issue" /></el-select></div>
@@ -328,6 +418,29 @@ const handleOffline = () => setOnline(false)
         <p v-if="!project.snapshots.length" class="empty-state">{{ store.t('noSnapshots') }}</p>
       </div>
       <template #footer><el-button type="primary" @click="createSnapshot">{{ store.t('snapshot') }}</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="exportBlocked" :title="store.t('exportBlockedTitle')" width="560px">
+      <p class="export-blocked-body">{{ store.t('exportBlockedBody', { count: layoutViolations.length }) }}</p>
+      <div class="export-issue-list">
+        <div v-for="item in layoutViolations" :key="item.cue.id" class="export-issue-item">
+          <div class="export-issue-head">
+            <b>#{{ issueCueNumber(item.cue.id) }}</b>
+            <el-tag v-if="item.cue.locked" size="small" type="warning" effect="plain"><el-icon><Lock /></el-icon>{{ store.t('locked') }}</el-tag>
+            <el-button size="small" text type="primary" :icon="Operation" :disabled="item.cue.locked" @click="store.autoBreakCue(item.cue.id)">{{ store.t('layoutAutoBreak') }}</el-button>
+          </div>
+          <p class="export-issue-text">{{ item.cue.target }}</p>
+          <ul>
+            <li v-for="(issue, reasonIndex) in item.issues" :key="reasonIndex">{{ issueReason(issue) }}</li>
+          </ul>
+        </div>
+      </div>
+      <p v-if="!layoutViolations.length" class="check-ok export-all-fixed">{{ store.t('exportBlockedAllFixed') }}</p>
+      <template #footer>
+        <el-button :icon="Operation" @click="rebreakFromDialog">{{ store.t('rebreakUnfixed') }}</el-button>
+        <el-button v-if="!layoutViolations.length" type="primary" :icon="Download" @click="exportBlocked = false; store.exportSrt()">{{ store.t('export') }}</el-button>
+        <el-button @click="exportBlocked = false">{{ store.t('close') }}</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
