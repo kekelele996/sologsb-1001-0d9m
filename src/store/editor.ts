@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import type { Cue, EditorDocument, Locale, Snapshot } from '../types'
+import type { Cue, EditorDocument, LayoutSpec, Locale, Snapshot } from '../types'
 import { loadDocument, saveDocument } from '../utils/db'
 import { makeId } from '../utils/id'
 import { parseScript, parseSrt, toSrt } from '../utils/subtitle'
+import { balanceText, checkLayout, DEFAULT_LAYOUT, isLayoutClean, type CueLayoutReport } from '../utils/layout'
 import { translate, type MessageKey } from '../i18n'
 
 const DOCUMENT_ID = 'subtitle-dubbing-document'
@@ -11,6 +12,7 @@ let channel: BroadcastChannel | undefined
 
 const cloneCues = (cues: Cue[]): Cue[] => JSON.parse(JSON.stringify(cues)) as Cue[]
 const plainDocument = (document: EditorDocument): EditorDocument => JSON.parse(JSON.stringify(document)) as EditorDocument
+const withLayout = (document: EditorDocument): EditorDocument => ({ ...DEFAULT_LAYOUT, ...document, layout: { ...DEFAULT_LAYOUT, ...document.layout } })
 
 const createDefaultDocument = (): EditorDocument => ({
   id: DOCUMENT_ID,
@@ -40,6 +42,7 @@ const createDefaultDocument = (): EditorDocument => ({
     { id: 'cue-demo-06', start: 25.4, end: 31.2, source: '所以我们决定把安装说明拆开，并为每个平台补上验证步骤。', target: '因此，我们拆分安装说明，并为每个平台补上验证步骤。', actorId: 'actor-chen', speed: 1.05, termIds: [], status: 'draft', locked: false },
   ],
   snapshots: [],
+  layout: { ...DEFAULT_LAYOUT },
 })
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'conflict'
@@ -74,6 +77,12 @@ export const useEditorStore = defineStore('subtitle-editor', {
     totalDuration(state): number {
       return Math.max(10, ...state.document.cues.map((cue) => cue.end)) * 1.04
     },
+    layoutReports(state): CueLayoutReport[] {
+      return checkLayout(state.document.cues, state.document.layout)
+    },
+    layoutViolationCount(): number {
+      return this.layoutReports.reduce((sum, report) => sum + report.violations.length, 0)
+    },
   },
   actions: {
     async initialize() {
@@ -81,7 +90,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.online = navigator.onLine
       const stored = await loadDocument(DOCUMENT_ID)
       if (stored) {
-        this.document = stored
+        this.document = withLayout(stored)
         this.lastSeenRevision = stored.revision
       } else {
         const saved = await saveDocument(plainDocument(this.document))
@@ -102,7 +111,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
           }
           const latest = await loadDocument(DOCUMENT_ID)
           if (latest && latest.revision > this.lastSeenRevision) {
-            this.document = latest
+            this.document = withLayout(latest)
             this.lastSeenRevision = latest.revision
             this.saveState = 'saved'
           }
@@ -189,7 +198,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
     async loadLatest() {
       const latest = await loadDocument(DOCUMENT_ID)
       if (!latest) return
-      this.document = latest
+      this.document = withLayout(latest)
       this.lastSeenRevision = latest.revision
       this.conflict = false
       this.saveState = 'saved'
@@ -217,6 +226,33 @@ export const useEditorStore = defineStore('subtitle-editor', {
         if (!cue || cue.locked) return
         Object.assign(cue, patch)
       })
+    },
+    updateLayoutSpec(patch: Partial<LayoutSpec>) {
+      this.document.layout = { ...this.document.layout, ...patch }
+      this.markChanged('layout-spec')
+    },
+    balanceCue(id: string): boolean {
+      const cue = this.document.cues.find((item) => item.id === id)
+      if (!cue || cue.locked) return false
+      const balanced = balanceText(cue.target || cue.source, this.document.layout)
+      if (balanced === (cue.target || cue.source)) return false
+      this.updateCue(id, { target: balanced }, 'balance-lines')
+      return true
+    },
+    balanceAllCues(): number {
+      const spec = this.document.layout
+      const pending = this.document.cues
+        .filter((cue) => !cue.locked)
+        .map((cue) => ({ cue, balanced: balanceText(cue.target || cue.source, spec) }))
+        .filter(({ cue, balanced }) => balanced !== (cue.target || cue.source))
+      if (!pending.length) return 0
+      this.commit('balance-all', (cues) => {
+        for (const { cue, balanced } of pending) {
+          const item = cues.find((entry) => entry.id === cue.id)
+          if (item && !item.locked) item.target = balanced
+        }
+      })
+      return pending.length
     },
     markStatus(id: string, status: Cue['status']) {
       this.updateCue(id, { status }, `status:${status}`)
@@ -307,7 +343,10 @@ export const useEditorStore = defineStore('subtitle-editor', {
       }, cues[0].id)
       return cues.length
     },
-    exportSrt() {
+    /** 导出前检查排版：仍有超限条目时停下，返回超限报告（不触发下载） */
+    exportSrt(): CueLayoutReport[] {
+      const offenders = this.layoutReports.filter((report) => report.violations.length > 0)
+      if (offenders.length) return offenders
       const blob = new Blob([toSrt(this.document.cues)], { type: 'text/plain;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
@@ -315,6 +354,10 @@ export const useEditorStore = defineStore('subtitle-editor', {
       anchor.download = `${this.document.title || 'subtitle'}.srt`
       anchor.click()
       URL.revokeObjectURL(url)
+      return []
+    },
+    layoutClean(): boolean {
+      return isLayoutClean(this.document.cues, this.document.layout)
     },
   },
 })

@@ -3,11 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
-  RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
+  Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor, Operation,
+  RefreshLeft, RefreshRight, Search, Unlock, UploadFilled, WarningFilled,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from './store/editor'
-import type { Cue, CueConflict } from './types'
+import type { Cue, CueConflict, LayoutSpec } from './types'
+import { checkCueLayout, MAX_LINE_CHARS_LIMIT, MAX_LINES_LIMIT, MIN_LAYOUT_VALUE, splitLines, type CueLayoutReport, type LayoutViolation } from './utils/layout'
 import { formatTime } from './utils/subtitle'
 
 const store = useEditorStore()
@@ -15,6 +16,8 @@ const { document: project, selectedCue, selectedCueId, visibleCues, saveState, c
 const fileInput = ref<HTMLInputElement>()
 const snapshotDialog = ref(false)
 const snapshotName = ref('')
+const exportDialog = ref(false)
+const exportOffenders = ref<CueLayoutReport[]>([])
 const search = ref('')
 
 const filteredCues = computed(() => {
@@ -25,6 +28,63 @@ const filteredCues = computed(() => {
 const selectedWarnings = computed(() => selectedCue.value ? cueWarnings(selectedCue.value) : [])
 const selectedTermMismatches = computed(() => selectedCue.value ? termMismatches(selectedCue.value) : [])
 const totalCharacters = computed(() => project.value.cues.reduce((sum, cue) => sum + cue.source.length + cue.target.length, 0))
+const layoutReportsById = computed(() => {
+  const map = new Map<string, CueLayoutReport>()
+  for (const report of store.layoutReports) map.set(report.cueId, report)
+  return map
+})
+const selectedLayoutReport = computed(() => selectedCue.value ? checkCueLayout(selectedCue.value, project.value.layout) : null)
+const cueIndexInProject = (id: string) => project.value.cues.findIndex((cue) => cue.id === id) + 1
+const reportOf = (id: string): CueLayoutReport | undefined => layoutReportsById.value.get(id)
+const violationCountOf = (id: string): number => reportOf(id)?.violations.length ?? 0
+const previewLines = (cue: Cue): string[] => {
+  const lines = splitLines(cue.target || cue.source)
+  return lines.length ? lines : ['']
+}
+function violationText(violation: LayoutViolation): string {
+  const spec = project.value.layout
+  return violation.kind === 'lineChars'
+    ? store.t('lineCharsOver', { line: violation.line ?? 0, actual: violation.actual, max: spec.maxLineChars })
+    : store.t('lineCountOver', { actual: violation.actual, max: spec.maxLines })
+}
+function onLayoutChange(field: keyof LayoutSpec, value: number | undefined) {
+  if (value === undefined || value < MIN_LAYOUT_VALUE) return
+  const limit = field === 'maxLineChars' ? MAX_LINE_CHARS_LIMIT : MAX_LINES_LIMIT
+  store.updateLayoutSpec({ [field]: Math.min(limit, Math.round(value)) })
+}
+function balanceSelected() {
+  if (!selectedCue.value) return
+  if (selectedCue.value.locked) return
+  if (store.balanceCue(selectedCue.value.id)) ElMessage.success(store.t('balanceDone', { count: 1 }))
+}
+function balanceAll() {
+  const count = store.balanceAllCues()
+  if (count > 0) ElMessage.success(store.t('balanceDone', { count }))
+  else ElMessage.info(store.t('balanceSkipped'))
+  if (exportDialog.value) refreshExportOffenders()
+}
+function refreshExportOffenders() {
+  exportOffenders.value = store.layoutReports.filter((report) => report.violations.length > 0)
+  if (!exportOffenders.value.length) {
+    exportDialog.value = false
+    ElMessage.success(store.t('exportDone'))
+    store.exportSrt()
+  }
+}
+function requestExport() {
+  const offenders = store.exportSrt()
+  if (!offenders.length) {
+    ElMessage.success(store.t('exportDone'))
+    return
+  }
+  exportOffenders.value = offenders
+  exportDialog.value = true
+}
+function jumpOffender(report: CueLayoutReport) {
+  store.selectCue(report.cueId)
+  exportDialog.value = false
+  nextTick(() => document.querySelector('.cue-row.active')?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+}
 const saveLabel = computed(() => ({
   saved: store.t('saved'), dirty: store.t('dirty'), saving: store.t('saving'), conflict: store.t('conflict'),
 }[saveState.value]))
@@ -145,7 +205,7 @@ const handleOffline = () => setOnline(false)
         <span class="save-state" :class="saveState"><i />{{ saveLabel }}</span>
         <input ref="fileInput" class="file-input" type="file" accept=".srt,.txt,text/plain" @change="importFile" />
         <el-button :icon="UploadFilled" @click="fileInput?.click()">{{ store.t('import') }}</el-button>
-        <el-button :icon="Download" @click="store.exportSrt">{{ store.t('export') }}</el-button>
+        <el-button :icon="Download" @click="requestExport">{{ store.t('export') }}</el-button>
         <el-button type="primary" :icon="DocumentCopy" @click="snapshotDialog = true">{{ store.t('snapshot') }}</el-button>
       </div>
     </header>
@@ -165,6 +225,27 @@ const handleOffline = () => setOnline(false)
 
     <main class="workspace">
       <aside class="left-panel panel">
+        <section class="layout-spec">
+          <div class="section-heading">
+            <span><el-icon><Operation /></el-icon>{{ store.t('layoutSpec') }}</span>
+            <el-tag v-if="store.layoutViolationCount" size="small" type="danger">{{ store.t('layoutViolationTag', { count: store.layoutViolationCount }) }}</el-tag>
+            <el-tag v-else size="small" type="success">OK</el-tag>
+          </div>
+          <label>{{ store.t('maxLineChars') }}</label>
+          <el-input-number
+            :model-value="project.layout.maxLineChars" :min="MIN_LAYOUT_VALUE" :max="MAX_LINE_CHARS_LIMIT" size="small"
+            controls-position="right" @change="onLayoutChange('maxLineChars', Number($event))"
+          />
+          <em>{{ store.t('charsUnit') }}</em>
+          <label>{{ store.t('maxLines') }}</label>
+          <el-input-number
+            :model-value="project.layout.maxLines" :min="MIN_LAYOUT_VALUE" :max="MAX_LINES_LIMIT" size="small"
+            controls-position="right" @change="onLayoutChange('maxLines', Number($event))"
+          />
+          <em>{{ store.t('linesUnit') }}</em>
+          <p class="section-note">{{ store.t('layoutSpecHint') }}</p>
+          <el-button size="small" type="primary" plain :icon="MagicStick" class="balance-all-btn" @click="balanceAll">{{ store.t('balanceAll') }}</el-button>
+        </section>
         <section>
           <div class="section-heading">
             <span><el-icon><Files /></el-icon>{{ store.t('actors') }}</span>
@@ -245,10 +326,22 @@ const handleOffline = () => setOnline(false)
                 <code>{{ formatTime(cue.start) }} → {{ formatTime(cue.end) }}</code>
                 <el-tag size="small" :type="statusType(cue.status)">{{ statusLabel(cue.status) }}</el-tag>
                 <el-icon v-if="cue.locked"><Lock /></el-icon>
+                <el-tag v-if="violationCountOf(cue.id)" size="small" type="danger" class="layout-flag">{{ store.t('layoutViolationTag', { count: violationCountOf(cue.id) }) }}</el-tag>
                 <span class="cue-warning-count" v-if="cueWarnings(cue).length">{{ cueWarnings(cue).length }} context</span>
               </div>
               <p class="source-text">{{ cue.source }}</p>
-              <p class="target-text" :class="{ empty: !cue.target }">{{ cue.target || '尚未填写译文' }}</p>
+              <div class="line-preview" :class="{ over: reportOf(cue.id)?.violations.length }">
+                <div
+                  v-for="(line, lineIndex) in previewLines(cue)" :key="lineIndex" class="preview-line"
+                  :class="{ overflow: line.length > project.layout.maxLineChars }"
+                >
+                  <span class="preview-text">{{ line || '—' }}</span>
+                  <span class="preview-count">{{ store.t('lineCharsCount', { actual: line.length }) }}</span>
+                </div>
+                <p v-for="violation in reportOf(cue.id)?.violations ?? []" :key="`${violation.kind}-${violation.line}`" class="layout-reason">
+                  <el-icon><WarningFilled /></el-icon>{{ violationText(violation) }}
+                </p>
+              </div>
             </div>
             <div class="cue-quick-actions">
               <el-button size="small" text :icon="MagicStick" @click.stop="store.splitCue(cue.id)">{{ store.t('split') }}</el-button>
@@ -281,6 +374,23 @@ const handleOffline = () => setOnline(false)
           <el-input :model-value="selectedCue.source" type="textarea" :rows="4" :disabled="selectedCue.locked" @change="updateSelected({ source: String($event) }, 'source-text')" />
           <label>{{ store.t('target') }}</label>
           <el-input :model-value="selectedCue.target" type="textarea" :rows="5" :disabled="selectedCue.locked" @change="updateSelected({ target: String($event) }, 'target-text')" />
+          <div class="inspector-preview-head">
+            <label>{{ store.t('linePreview') }}</label>
+            <el-button size="small" text type="primary" :icon="MagicStick" :disabled="selectedCue.locked" @click="balanceSelected">{{ store.t('balance') }}</el-button>
+          </div>
+          <div class="inspector-preview" :class="{ over: selectedLayoutReport?.violations.length }">
+            <div
+              v-for="(line, lineIndex) in selectedLayoutReport?.lines.length ? selectedLayoutReport.lines : ['']" :key="lineIndex"
+              class="preview-line" :class="{ overflow: line.length > project.layout.maxLineChars }"
+            >
+              <span class="preview-text">{{ line || '—' }}</span>
+              <span class="preview-count">{{ store.t('lineCharsCount', { actual: line.length }) }}</span>
+            </div>
+          </div>
+          <p v-for="violation in selectedLayoutReport?.violations ?? []" :key="`${violation.kind}-${violation.line}`" class="layout-reason">
+            <el-icon><WarningFilled /></el-icon>{{ violationText(violation) }}
+          </p>
+          <p v-if="selectedLayoutReport && !selectedLayoutReport.violations.length && selectedLayoutReport.lines.length" class="check-ok">{{ store.t('layoutOk') }}</p>
           <div class="two-columns">
             <div><label>{{ store.t('speed') }}</label><el-input-number :model-value="selectedCue.speed" :disabled="selectedCue.locked" :min="0.5" :max="1.8" :step="0.01" controls-position="right" @change="updateSelected({ speed: Number($event) }, 'speed')" /></div>
             <div><label>{{ store.t('status') }}</label><el-select :model-value="selectedCue.status" :disabled="selectedCue.locked" @change="store.markStatus(selectedCue.id, $event)"><el-option :label="store.t('draft')" value="draft" /><el-option :label="store.t('reviewed')" value="reviewed" /><el-option :label="store.t('issue')" value="issue" /></el-select></div>
@@ -328,6 +438,32 @@ const handleOffline = () => setOnline(false)
         <p v-if="!project.snapshots.length" class="empty-state">{{ store.t('noSnapshots') }}</p>
       </div>
       <template #footer><el-button type="primary" @click="createSnapshot">{{ store.t('snapshot') }}</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="exportDialog" :title="store.t('exportBlockedTitle')" width="560px" :close-on-click-modal="false">
+      <p class="export-blocked-body">{{ store.t('exportBlockedBody', { count: exportOffenders.length }) }}</p>
+      <div class="offender-list">
+        <div v-for="report in exportOffenders" :key="report.cueId" class="offender-item">
+          <div class="offender-head">
+            <strong>{{ store.t('offenderIndex', { index: cueIndexInProject(report.cueId) }) }}</strong>
+            <code>{{ formatTime(project.cues.find((cue) => cue.id === report.cueId)?.start ?? 0) }}</code>
+            <el-button size="small" text type="primary" @click="jumpOffender(report)">{{ store.t('reviewNow') }}</el-button>
+          </div>
+          <div class="offender-lines">
+            <div v-for="(line, lineIndex) in report.lines" :key="lineIndex" class="preview-line" :class="{ overflow: line.length > project.layout.maxLineChars }">
+              <span class="preview-text">{{ line }}</span>
+              <span class="preview-count">{{ store.t('lineCharsCount', { actual: line.length }) }}</span>
+            </div>
+          </div>
+          <p v-for="violation in report.violations" :key="`${violation.kind}-${violation.line}`" class="layout-reason">
+            <el-icon><WarningFilled /></el-icon>{{ violationText(violation) }}
+          </p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button :icon="MagicStick" @click="balanceAll">{{ store.t('balanceAll') }}</el-button>
+        <el-button type="primary" :disabled="!!exportOffenders.length" @click="refreshExportOffenders">{{ store.t('export') }}</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
